@@ -1,83 +1,161 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
-
-from services.youtube import download_ytv_and_zip
-from database.db import set_data,get_data
-
 import os
-from services.utils import delete_playlist_data
+import re
+import logging
+import yt_dlp
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+from config import TEMP_DIR
 
+logger = logging.getLogger(__name__)
 
-async def select_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a format selection menu."""
-    # Get the URL sent by the user
-    url = update.message.text
-    
-    set_data(update.effective_chat.id, {
-        "url":url,
-        "status": "started"  # Custom status
-    })
-    
+def is_youtube_url(url: str) -> bool:
+    """Check if URL is a valid YouTube link."""
+    youtube_regex = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/'
+    return re.match(youtube_regex, url) is not None
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle YouTube URLs sent by user."""
+    url = update.message.text.strip()
+
+    if not is_youtube_url(url):
+        await update.message.reply_text(
+            "❌ Please send a valid YouTube URL.\n"
+            "Example: https://youtube.com/watch?v=..."
+        )
+        return
+
+    # Store URL in context
+    context.user_data['youtube_url'] = url
+
     keyboard = [
         [
-            InlineKeyboardButton("Audio", callback_data="mp3"),
-            InlineKeyboardButton("Video", callback_data="mp4"),
+            InlineKeyboardButton("🎵 Audio (MP3)", callback_data="audio"),
+            InlineKeyboardButton("📹 Video (MP4)", callback_data="video")
         ],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "Great\! How would you like to download your video?\n\n"
-        "🎵 *Audio \(MP3\)* – Best for music and podcasts\.\n"
-        "📹 *Video \(MP4\)* – Watch in full quality\.\n\n"
-        "Tap a button below to choose:",
+        "🎬 *YouTube URL Detected!*\n\n"
+        "Choose download format:",
         reply_markup=reply_markup,
-        parse_mode="MarkdownV2"
+        parse_mode="Markdown"
     )
 
-
-async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles user selection for audio/video format."""
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button callbacks."""
     query = update.callback_query
-    selected_format = query.data  # Get the selected format (mp3 or mp4)
+    await query.answer()
 
-    await query.answer()  # Acknowledge the button press
-    chat_id = update.effective_chat.id
-    
-    user_data = get_data(chat_id)
+    if query.data == "help":
+        await query.edit_message_text(
+            "📖 *Help*\n\n"
+            "1. Send me a YouTube URL\n"
+            "2. Choose Audio or Video\n"
+            "3. Wait for download\n\n"
+            "⚠️ Large files may take time to process.",
+            parse_mode="Markdown"
+        )
+        return
 
-    if selected_format == "mp3":
-        await update.callback_query.edit_message_text(
-            "🎶 *You chose Audio \(MP3\)\!* Preparing your download\.\.\.",
-            parse_mode="MarkdownV2",
+    if query.data == "cancel":
+        await query.edit_message_text("❌ Download cancelled.")
+        return
+
+    # Get the stored URL
+    url = context.user_data.get('youtube_url')
+    if not url:
+        await query.edit_message_text(
+            "❌ No URL found. Please send a YouTube URL first."
         )
-    elif selected_format == "mp4":
-        await update.callback_query.edit_message_text(
-            "📺 *You chose Video \(MP4\)\!* Fetching your file\.\.\.",
-            parse_mode="MarkdownV2",
+        return
+
+    format_type = query.data  # 'audio' or 'video'
+    await query.edit_message_text(
+        f"⏳ Processing your {'audio' if format_type == 'audio' else 'video'} request...\n"
+        "This may take a few moments."
+    )
+
+    try:
+        await download_and_send(update, context, url, format_type)
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        await query.edit_message_text(
+            f"❌ Download failed: {str(e)}\n\n"
+            "Please try again with a different video."
         )
-    else:
-        await update.callback_query.edit_message_text(
-            "❌ *Download canceled\.* Let me know if you need anything else\!"
-             ,parse_mode="MarkdownV2"
-             )
-    if selected_format in ["mp4","mp3"]:
-        # Specify the path to your zip file
-        zip_file_path = await download_ytv_and_zip(user_data.get("url"),selected_format)
-        
-        # Send the zip file to the user
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=open(zip_file_path, 'rb'),
-            filename=os.path.basename(zip_file_path),
-            caption="Here is your zip file!",
-            read_timeout=60,  # Increase timeout
-            write_timeout=60,  # Increase timeout
-        )
+
+async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, format_type: str):
+    """Download and send the file to user."""
+    query = update.callback_query
+
+    # yt-dlp options
+    if format_type == 'audio':
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': f'{TEMP_DIR}/%(title)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+        }
+    else:  # video
+        ydl_opts = {
+            'format': 'best[height<=720]',
+            'outtmpl': f'{TEMP_DIR}/%(title)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+    # Download the file
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+
+        # Fix file extension for audio
+        if format_type == 'audio':
+            filename = filename.rsplit('.', 1)[0] + '.mp3'
+
+        # Check if file exists (try different extensions)
+        if not os.path.exists(filename):
+            for ext in ['.mp4', '.mkv', '.webm', '.mp3', '.m4a']:
+                test_file = filename.rsplit('.', 1)[0] + ext
+                if os.path.exists(test_file):
+                    filename = test_file
+                    break
+
+        # Send the file
+        with open(filename, 'rb') as f:
+            if format_type == 'audio':
+                await context.bot.send_audio(
+                    chat_id=update.effective_chat.id,
+                    audio=f,
+                    title=info.get('title', 'Audio'),
+                    performer=info.get('uploader', 'Unknown')
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=f,
+                    caption=f"📹 {info.get('title', 'Video')}"
+                )
+
+        # Clean up
         try:
-          os.remove(zip_file_path)
-          delete_playlist_data("download")
-        except Exception as e:
-          print("Error happened " + e.__str__())
+            os.remove(filename)
+        except:
+            pass
+
+        await query.edit_message_text(
+            f"✅ Download complete!\n\n"
+            f"📌 *{info.get('title', 'File')}*\n"
+            f"📤 Sent successfully!",
+            parse_mode="Markdown"
+        )
+
+# This is used by bot.py
+handle_download = handle_callback
