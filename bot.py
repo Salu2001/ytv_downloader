@@ -1,71 +1,41 @@
+import os
 import logging
 from telegram import Update
-from telegram.ext import (ApplicationBuilder, ContextTypes, CommandHandler,CallbackQueryHandler,ConversationHandler,MessageHandler,filters,CallbackQueryHandler)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
+# Import handlers
+from handlers.start import start_command
+from handlers.download import handle_url, handle_callback, handle_download
+from config import BOT_TOKEN
 
-from dotenv import load_dotenv # type: ignore
-import os
-import yt_dlp
-
-import zipfile
-import os
-import json
-import asyncio
-
-
-from handlers.start import start
-from handlers.help import help_command
-from handlers.downloader import select_format,download
-
-load_dotenv()
-
-
+# Enable logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
+def main():
+    """Start the bot."""
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN environment variable not set!")
 
+    # Create application
+    application = Application.builder().token(BOT_TOKEN).build()
 
-async def fetch_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch YouTube metadata asynchronously."""
-    ytv_url = "https://youtube.com/watch?v=-qjE8JkIVoQ&si=QeI-Vt4JGxV6Sr9Y"
-    with yt_dlp.YoutubeDL({}) as ydl:
-        result = ydl.extract_info(ytv_url, download=False)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=result.get("title", "Unknown Playlist"))
-        
-        
-async def download_ytv_and_zip(ytv_url):
-    """Download and ZIP videos asynchronously."""
-    ydl_opts = {"outtmpl": "download/%(title)s.%(ext)s"}
-    
-    download_title = ""
-        
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(ytv_url, download=False)
-        download_title = info.get("title", "Unknown Playlist")
-        
-        ydl.download([ytv_url])
-    
-    zip_path = os.path.join(f"{download_title}.zip")
-    #zip_folder.apply_async(args=["download", zip_path])
-    
-    return f"Downloading {download_title} and zipping..."
+    # Command handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", start_command))
 
+    # Message handler for YouTube URLs
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
 
+    # Callback handler for buttons
+    application.add_handler(CallbackQueryHandler(handle_callback))
 
+    # Run the bot
+    logger.info("Bot started polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-    application = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).read_timeout(30).write_timeout(30).build()
-    
-    start_handler = CommandHandler('start', start)
-    #ytv_metadata_handler = CommandHandler('info', fetch_metadata)
-    
-    application.add_handler(CommandHandler(['start','help'], start))
-    #application.add_handler(CommandHandler('download', select_format))
-    application.add_handler(MessageHandler(filters.Regex(r"^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|playlist\?list=)|youtu\.be\/)[\w\-]+"),select_format))
-    
-    application.add_handler(CallbackQueryHandler(download))
-    #application.add_handler(CommandHandler('help', help_command))
-    
-    application.run_polling()
+if __name__ == "__main__":
+    main()
