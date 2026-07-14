@@ -120,8 +120,9 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if format_type == 'audio':
             filename = filename.rsplit('.', 1)[0] + '.mp3'
 
-        # Check if file exists (try different extensions)
+        # Check if file exists
         if not os.path.exists(filename):
+            # Try with .webm or other extensions
             for ext in ['.mp4', '.mkv', '.webm', '.mp3', '.m4a']:
                 test_file = filename.rsplit('.', 1)[0] + ext
                 if os.path.exists(test_file):
@@ -156,6 +157,3 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             f"📤 Sent successfully!",
             parse_mode="Markdown"
         )
-
-# This is used by bot.py
-handle_download = handle_callback
